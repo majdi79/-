@@ -1,10 +1,5 @@
 import { initializeApp } from 'firebase/app';
-import {
-  getAuth,
-  GoogleAuthProvider,
-  signInWithPopup,
-  signOut,
-} from 'firebase/auth';
+import { getAuth } from 'firebase/auth';
 import {
   collection,
   deleteDoc,
@@ -14,6 +9,7 @@ import {
   getFirestore,
   onSnapshot,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   Unsubscribe,
@@ -45,9 +41,6 @@ export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 export const firebaseProjectId = firebaseConfig.projectId;
 export const firestoreDatabaseId = firebaseConfig.firestoreDatabaseId;
-
-const googleProvider = new GoogleAuthProvider();
-googleProvider.setCustomParameters({ prompt: 'select_account' });
 
 export enum OperationType {
   CREATE = 'create',
@@ -83,11 +76,11 @@ export function handleFirestoreError(
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
+      userId: auth.currentUser?.uid ?? null,
+      email: auth.currentUser?.email ?? null,
+      emailVerified: auth.currentUser?.emailVerified ?? null,
+      isAnonymous: auth.currentUser?.isAnonymous ?? null,
+      tenantId: auth.currentUser?.tenantId ?? null,
       providerInfo:
         auth.currentUser?.providerData?.map((provider) => ({
           providerId: provider.providerId,
@@ -112,14 +105,6 @@ async function testConnection(): Promise<void> {
 }
 testConnection();
 
-export async function signInWithGoogle(): Promise<void> {
-  await signInWithPopup(auth, googleProvider);
-}
-
-export async function signOutUser(): Promise<void> {
-  await signOut(auth);
-}
-
 function clampAmount(val: number): number {
   if (!Number.isFinite(val) || val < FIELD_LIMITS.AMOUNT_MIN) return 0;
   if (val > FIELD_LIMITS.AMOUNT_MAX) return FIELD_LIMITS.AMOUNT_MAX;
@@ -136,59 +121,82 @@ function generateSafeId(prefix: string): string {
   return `${prefix}_${stamp}_${rand}`.replace(/[^a-zA-Z0-9_-]/g, '');
 }
 
+const inFlightEnsureFund = new Map<string, Promise<UserFund>>();
+
 /**
- * Ensures the user's parent fund document exists in /users/{userId}
+ * Atomically ensures the parent fund document exists in /funds/{fundId}.
+ * Deduplicates concurrent calls (e.g., React StrictMode double-mount or multi-device startup).
  */
-export async function ensureUserFund(userId: string): Promise<UserFund> {
-  const fundPath = `users/${userId}`;
-  const fundRef = doc(db, 'users', userId);
-  try {
-    const snap = await getDoc(fundRef);
-    if (snap.exists()) {
-      const existing = snap.data() as UserFund;
-      if (existing.currency !== FIXED_CURRENCY) {
-        await updateDoc(fundRef, {
+export function ensureFund(fundId: string): Promise<UserFund> {
+  const existingPromise = inFlightEnsureFund.get(fundId);
+  if (existingPromise) {
+    return existingPromise;
+  }
+
+  const fundPath = `funds/${fundId}`;
+  const fundRef = doc(db, 'funds', fundId);
+
+  const task = (async (): Promise<UserFund> => {
+    try {
+      return await runTransaction(db, async (tx) => {
+        const snap = await tx.get(fundRef);
+        if (snap.exists()) {
+          const existing = snap.data() as UserFund;
+          if (existing.currency !== FIXED_CURRENCY) {
+            tx.update(fundRef, {
+              currency: FIXED_CURRENCY,
+              updatedAt: serverTimestamp(),
+            });
+            return { ...existing, currency: FIXED_CURRENCY };
+          }
+          return existing;
+        }
+
+        const initialFund = {
+          fundId,
+          fundName: 'صندوق العائلة',
           currency: FIXED_CURRENCY,
+          reminderTemplate: DEFAULT_REMINDER_TEMPLATE,
+          createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
-        });
-        return { ...existing, currency: FIXED_CURRENCY };
+        };
+        tx.set(fundRef, initialFund);
+        return {
+          fundId,
+          fundName: initialFund.fundName,
+          currency: initialFund.currency,
+          reminderTemplate: initialFund.reminderTemplate,
+        };
+      });
+    } catch (error) {
+      // Fallback check in case another device created the fund right before our transaction
+      try {
+        const verifySnap = await getDoc(fundRef);
+        if (verifySnap.exists()) {
+          return verifySnap.data() as UserFund;
+        }
+      } catch {
+        // Proceed to surface original Firestore error
       }
-      return existing;
+      handleFirestoreError(error, OperationType.CREATE, fundPath);
     }
-  } catch (error) {
-    handleFirestoreError(error, OperationType.GET, fundPath);
-  }
+  })();
 
-  const initialFund = {
-    ownerId: userId,
-    fundName: 'صندوق العائلة',
-    currency: FIXED_CURRENCY,
-    reminderTemplate: DEFAULT_REMINDER_TEMPLATE,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  };
-
-  try {
-    await setDoc(fundRef, initialFund);
-    return {
-      ownerId: userId,
-      fundName: initialFund.fundName,
-      currency: initialFund.currency,
-      reminderTemplate: initialFund.reminderTemplate,
-    };
-  } catch (error) {
-    handleFirestoreError(error, OperationType.CREATE, fundPath);
-  }
+  inFlightEnsureFund.set(fundId, task);
+  task.finally(() => {
+    inFlightEnsureFund.delete(fundId);
+  });
+  return task;
 }
 
-export function subscribeUserFund(
-  userId: string,
+export function subscribeFund(
+  fundId: string,
   onData: (fund: UserFund | null) => void,
   onError: (err: Error) => void
 ): Unsubscribe {
-  const path = `users/${userId}`;
+  const path = `funds/${fundId}`;
   return onSnapshot(
-    doc(db, 'users', userId),
+    doc(db, 'funds', fundId),
     (snapshot) => {
       onData(snapshot.exists() ? (snapshot.data() as UserFund) : null);
     },
@@ -203,12 +211,12 @@ export function subscribeUserFund(
 }
 
 export function subscribeMembers(
-  userId: string,
+  fundId: string,
   onData: (members: FamilyMember[]) => void,
   onError: (err: Error) => void
 ): Unsubscribe {
-  const path = `users/${userId}/members`;
-  const q = query(collection(db, 'users', userId, 'members'), where('ownerId', '==', userId));
+  const path = `funds/${fundId}/members`;
+  const q = query(collection(db, 'funds', fundId, 'members'), where('fundId', '==', fundId));
   return onSnapshot(
     q,
     (snapshot) => {
@@ -230,12 +238,12 @@ export function subscribeMembers(
 }
 
 export function subscribePayments(
-  userId: string,
+  fundId: string,
   onData: (payments: MonthlyPayment[]) => void,
   onError: (err: Error) => void
 ): Unsubscribe {
-  const path = `users/${userId}/payments`;
-  const q = query(collection(db, 'users', userId, 'payments'), where('ownerId', '==', userId));
+  const path = `funds/${fundId}/payments`;
+  const q = query(collection(db, 'funds', fundId, 'payments'), where('fundId', '==', fundId));
   return onSnapshot(
     q,
     (snapshot) => {
@@ -256,17 +264,17 @@ export function subscribePayments(
 }
 
 export async function updateFundSettings(
-  userId: string,
+  fundId: string,
   input: { fundName: string; reminderTemplate: string }
 ): Promise<void> {
-  const path = `users/${userId}`;
+  const path = `funds/${fundId}`;
   const fundName = sanitizeText(input.fundName, FIELD_LIMITS.FUND_NAME_MAX) || 'صندوق العائلة';
   const reminderTemplate =
     sanitizeText(input.reminderTemplate, FIELD_LIMITS.REMINDER_TEMPLATE_MAX) ||
     DEFAULT_REMINDER_TEMPLATE;
 
   try {
-    await updateDoc(doc(db, 'users', userId), {
+    await updateDoc(doc(db, 'funds', fundId), {
       fundName,
       currency: FIXED_CURRENCY,
       reminderTemplate,
@@ -278,7 +286,7 @@ export async function updateFundSettings(
 }
 
 export async function createMember(
-  userId: string,
+  fundId: string,
   input: {
     name: string;
     phone: string;
@@ -289,7 +297,7 @@ export async function createMember(
   }
 ): Promise<string> {
   const memberId = generateSafeId('mem');
-  const path = `users/${userId}/members/${memberId}`;
+  const path = `funds/${fundId}/members/${memberId}`;
   const name = sanitizeText(input.name, FIELD_LIMITS.MEMBER_NAME_MAX);
   if (!name) throw new Error('يرجى إدخال اسم الفرد.');
 
@@ -301,8 +309,8 @@ export async function createMember(
     : getCurrentMonthKey();
 
   try {
-    await setDoc(doc(db, 'users', userId, 'members', memberId), {
-      ownerId: userId,
+    await setDoc(doc(db, 'funds', fundId, 'members', memberId), {
+      fundId,
       name,
       phone,
       relation,
@@ -319,7 +327,7 @@ export async function createMember(
 }
 
 export async function updateMember(
-  userId: string,
+  fundId: string,
   memberId: string,
   input: {
     name: string;
@@ -330,7 +338,7 @@ export async function updateMember(
     isActive: boolean;
   }
 ): Promise<void> {
-  const path = `users/${userId}/members/${memberId}`;
+  const path = `funds/${fundId}/members/${memberId}`;
   const name = sanitizeText(input.name, FIELD_LIMITS.MEMBER_NAME_MAX);
   if (!name) throw new Error('يرجى إدخال اسم الفرد.');
 
@@ -342,7 +350,7 @@ export async function updateMember(
     : getCurrentMonthKey();
 
   try {
-    await updateDoc(doc(db, 'users', userId, 'members', memberId), {
+    await updateDoc(doc(db, 'funds', fundId, 'members', memberId), {
       name,
       phone,
       relation,
@@ -356,38 +364,22 @@ export async function updateMember(
   }
 }
 
-export async function toggleMemberActiveStatus(
-  userId: string,
-  memberId: string,
-  isActive: boolean
-): Promise<void> {
-  const path = `users/${userId}/members/${memberId}`;
-  try {
-    await updateDoc(doc(db, 'users', userId, 'members', memberId), {
-      isActive: Boolean(isActive),
-      updatedAt: serverTimestamp(),
-    });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, path);
-  }
-}
-
 export async function deleteMemberAndPayments(
-  userId: string,
+  fundId: string,
   memberId: string,
   memberPaymentIds: string[]
 ): Promise<void> {
-  const path = `users/${userId}/members/${memberId}`;
+  const path = `funds/${fundId}/members/${memberId}`;
   try {
     if (memberPaymentIds.length === 0) {
-      await deleteDoc(doc(db, 'users', userId, 'members', memberId));
+      await deleteDoc(doc(db, 'funds', fundId, 'members', memberId));
       return;
     }
     const batch = writeBatch(db);
     memberPaymentIds.forEach((paymentId) => {
-      batch.delete(doc(db, 'users', userId, 'payments', paymentId));
+      batch.delete(doc(db, 'funds', fundId, 'payments', paymentId));
     });
-    batch.delete(doc(db, 'users', userId, 'members', memberId));
+    batch.delete(doc(db, 'funds', fundId, 'members', memberId));
     await batch.commit();
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, path);
@@ -395,7 +387,7 @@ export async function deleteMemberAndPayments(
 }
 
 export async function saveMonthlyPayment(
-  userId: string,
+  fundId: string,
   input: {
     memberId: string;
     monthKey: string;
@@ -407,7 +399,7 @@ export async function saveMonthlyPayment(
   }
 ): Promise<void> {
   const paymentId = `${input.memberId}_${input.monthKey}`;
-  const path = `users/${userId}/payments/${paymentId}`;
+  const path = `funds/${fundId}/payments/${paymentId}`;
   const expectedAmount = clampAmount(input.expectedAmount);
   const paidAmount = clampAmount(input.paidAmount);
   const status: PaymentStatus = computePaymentStatus(paidAmount, expectedAmount);
@@ -415,85 +407,83 @@ export async function saveMonthlyPayment(
   const paidDate = FIELD_PATTERNS.DATE_STR.test(rawDate) ? rawDate : '';
   const note = sanitizeText(input.note, FIELD_LIMITS.NOTE_MAX);
 
-  const ref = doc(db, 'users', userId, 'payments', paymentId);
+  const ref = doc(db, 'funds', fundId, 'payments', paymentId);
 
-  if (input.existingPayment) {
-    try {
-      await updateDoc(ref, {
-        expectedAmount,
-        paidAmount,
-        status,
-        paidDate,
-        note,
-        updatedAt: serverTimestamp(),
-      });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, path);
-    }
-  } else {
-    try {
-      await setDoc(ref, {
-        ownerId: userId,
-        memberId: input.memberId,
-        monthKey: input.monthKey,
-        expectedAmount,
-        paidAmount,
-        status,
-        paidDate,
-        note,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, path);
-    }
+  try {
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(ref);
+      if (snap.exists()) {
+        tx.update(ref, {
+          expectedAmount,
+          paidAmount,
+          status,
+          paidDate,
+          note,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        tx.set(ref, {
+          fundId,
+          memberId: input.memberId,
+          monthKey: input.monthKey,
+          expectedAmount,
+          paidAmount,
+          status,
+          paidDate,
+          note,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
   }
 }
 
 export async function recordReminderSent(
-  userId: string,
+  fundId: string,
   member: FamilyMember,
   monthKey: string,
-  existingPayment?: MonthlyPayment
+  _existingPayment?: MonthlyPayment
 ): Promise<void> {
   const paymentId = `${member.id}_${monthKey}`;
-  const path = `users/${userId}/payments/${paymentId}`;
-  const ref = doc(db, 'users', userId, 'payments', paymentId);
+  const path = `funds/${fundId}/payments/${paymentId}`;
+  const ref = doc(db, 'funds', fundId, 'payments', paymentId);
 
-  if (existingPayment) {
-    try {
-      await updateDoc(ref, {
-        lastRemindedAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, path);
-    }
-  } else {
-    try {
-      await setDoc(ref, {
-        ownerId: userId,
-        memberId: member.id,
-        monthKey,
-        expectedAmount: clampAmount(member.monthlyAmount),
-        paidAmount: 0,
-        status: member.monthlyAmount <= 0 ? 'paid' : 'unpaid',
-        paidDate: '',
-        note: '',
-        lastRemindedAt: serverTimestamp(),
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, path);
-    }
+  try {
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(ref);
+      if (snap.exists()) {
+        tx.update(ref, {
+          lastRemindedAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        tx.set(ref, {
+          fundId,
+          memberId: member.id,
+          monthKey,
+          expectedAmount: clampAmount(member.monthlyAmount),
+          paidAmount: 0,
+          status: member.monthlyAmount <= 0 ? 'paid' : 'unpaid',
+          paidDate: '',
+          note: '',
+          lastRemindedAt: serverTimestamp(),
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
   }
 }
 
 /**
- * Populates a realistic Arabic family fund sample dataset across 3 months so users can test reports & reminders immediately.
+ * Populates a realistic Bahraini family fund sample dataset across 3 months.
  */
-export async function seedSampleFamilyData(userId: string): Promise<void> {
+export async function seedSampleFamilyData(fundId: string): Promise<void> {
   const currentMonth = getCurrentMonthKey();
   const prevMonth1 = addMonths(currentMonth, -1);
   const prevMonth2 = addMonths(currentMonth, -2);
@@ -511,8 +501,8 @@ export async function seedSampleFamilyData(userId: string): Promise<void> {
   const batch = writeBatch(db);
 
   sampleMembers.forEach((m) => {
-    batch.set(doc(db, 'users', userId, 'members', m.id), {
-      ownerId: userId,
+    batch.set(doc(db, 'funds', fundId, 'members', m.id), {
+      fundId,
       name: m.name,
       phone: m.phone,
       relation: m.relation,
@@ -524,11 +514,9 @@ export async function seedSampleFamilyData(userId: string): Promise<void> {
     });
   });
 
-  // Historical payments for prevMonth2 & prevMonth1 + mixed currentMonth statuses
   sampleMembers.forEach((m, idx) => {
-    // 2 months ago: all paid
-    batch.set(doc(db, 'users', userId, 'payments', `${m.id}_${prevMonth2}`), {
-      ownerId: userId,
+    batch.set(doc(db, 'funds', fundId, 'payments', `${m.id}_${prevMonth2}`), {
+      fundId,
       memberId: m.id,
       monthKey: prevMonth2,
       expectedAmount: m.monthlyAmount,
@@ -540,10 +528,9 @@ export async function seedSampleFamilyData(userId: string): Promise<void> {
       updatedAt: serverTimestamp(),
     });
 
-    // Last month: 5 paid, 1 partial
-    const lastPaid = idx === 4 ? Math.round(m.monthlyAmount / 2) : m.monthlyAmount;
-    batch.set(doc(db, 'users', userId, 'payments', `${m.id}_${prevMonth1}`), {
-      ownerId: userId,
+    const lastPaid = idx === 4 ? Math.round((m.monthlyAmount / 2) * 1000) / 1000 : m.monthlyAmount;
+    batch.set(doc(db, 'funds', fundId, 'payments', `${m.id}_${prevMonth1}`), {
+      fundId,
       memberId: m.id,
       monthKey: prevMonth1,
       expectedAmount: m.monthlyAmount,
@@ -555,10 +542,9 @@ export async function seedSampleFamilyData(userId: string): Promise<void> {
       updatedAt: serverTimestamp(),
     });
 
-    // Current month: 3 paid, 1 partial, 2 unpaid
     if (idx < 3) {
-      batch.set(doc(db, 'users', userId, 'payments', `${m.id}_${currentMonth}`), {
-        ownerId: userId,
+      batch.set(doc(db, 'funds', fundId, 'payments', `${m.id}_${currentMonth}`), {
+        fundId,
         memberId: m.id,
         monthKey: currentMonth,
         expectedAmount: m.monthlyAmount,
@@ -570,9 +556,9 @@ export async function seedSampleFamilyData(userId: string): Promise<void> {
         updatedAt: serverTimestamp(),
       });
     } else if (idx === 3) {
-      const partialAmt = Math.round(m.monthlyAmount * 0.5);
-      batch.set(doc(db, 'users', userId, 'payments', `${m.id}_${currentMonth}`), {
-        ownerId: userId,
+      const partialAmt = Math.round(m.monthlyAmount * 0.5 * 1000) / 1000;
+      batch.set(doc(db, 'funds', fundId, 'payments', `${m.id}_${currentMonth}`), {
+        fundId,
         memberId: m.id,
         monthKey: currentMonth,
         expectedAmount: m.monthlyAmount,
@@ -589,6 +575,6 @@ export async function seedSampleFamilyData(userId: string): Promise<void> {
   try {
     await batch.commit();
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `users/${userId}`);
+    handleFirestoreError(error, OperationType.WRITE, `funds/${fundId}`);
   }
 }

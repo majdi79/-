@@ -12,24 +12,16 @@ service cloud.firestore {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isValidFundId(id) {
+      return id is string && id.size() >= 6 && id.size() <= 64 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
     function incoming() {
       return request.resource.data;
     }
 
     function existing() {
       return resource.data;
-    }
-
-    function isSignedIn() {
-      return request.auth != null;
-    }
-
-    function isVerifiedUser() {
-      return isSignedIn() && request.auth.token.email_verified == true;
-    }
-
-    function isVerifiedOwner(userId) {
-      return isVerifiedUser() && request.auth.uid == userId;
     }
 
     function isValidMonthKey(val) {
@@ -44,21 +36,20 @@ service cloud.firestore {
       return val is string && val.size() <= 24 && val.matches('^[0-9+\\-\\s()]{0,24}$');
     }
 
-    function fundExists(userId) {
-      return exists(/databases/$(database)/documents/users/$(userId));
+    function fundExists(fundId) {
+      return exists(/databases/$(database)/documents/funds/$(fundId));
     }
 
-    function memberExistsAfter(userId, memberId) {
-      return existsAfter(/databases/$(database)/documents/users/$(userId)/members/$(memberId));
+    function memberExistsAfter(fundId, memberId) {
+      return existsAfter(/databases/$(database)/documents/funds/$(fundId)/members/$(memberId));
     }
 
-    // Validation Blueprint: UserFund
-    function isValidUserFund(data, userId) {
-      return data.keys().hasAll(['ownerId', 'fundName', 'currency', 'reminderTemplate', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['ownerId', 'fundName', 'currency', 'reminderTemplate', 'createdAt', 'updatedAt'])
-        && isValidId(data.ownerId)
-        && data.ownerId == request.auth.uid
-        && data.ownerId == userId
+    // Validation Blueprint: FamilyFund
+    function isValidFund(data, fundId) {
+      return data.keys().hasAll(['fundId', 'fundName', 'currency', 'reminderTemplate', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['fundId', 'fundName', 'currency', 'reminderTemplate', 'createdAt', 'updatedAt'])
+        && isValidFundId(data.fundId)
+        && data.fundId == fundId
         && data.fundName is string
         && data.fundName.size() >= 1
         && data.fundName.size() <= 80
@@ -73,12 +64,11 @@ service cloud.firestore {
     }
 
     // Validation Blueprint: FamilyMember
-    function isValidMember(data, userId) {
-      return data.keys().hasAll(['ownerId', 'name', 'phone', 'relation', 'monthlyAmount', 'startMonth', 'isActive', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['ownerId', 'name', 'phone', 'relation', 'monthlyAmount', 'startMonth', 'isActive', 'createdAt', 'updatedAt'])
-        && isValidId(data.ownerId)
-        && data.ownerId == request.auth.uid
-        && data.ownerId == userId
+    function isValidMember(data, fundId) {
+      return data.keys().hasAll(['fundId', 'name', 'phone', 'relation', 'monthlyAmount', 'startMonth', 'isActive', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['fundId', 'name', 'phone', 'relation', 'monthlyAmount', 'startMonth', 'isActive', 'createdAt', 'updatedAt'])
+        && isValidFundId(data.fundId)
+        && data.fundId == fundId
         && data.name is string
         && data.name.size() >= 1
         && data.name.size() <= 80
@@ -95,12 +85,11 @@ service cloud.firestore {
     }
 
     // Validation Blueprint: MonthlyPayment
-    function isValidPayment(data, userId) {
-      return data.keys().hasAll(['ownerId', 'memberId', 'monthKey', 'expectedAmount', 'paidAmount', 'status', 'paidDate', 'note', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['ownerId', 'memberId', 'monthKey', 'expectedAmount', 'paidAmount', 'status', 'paidDate', 'note', 'lastRemindedAt', 'createdAt', 'updatedAt'])
-        && isValidId(data.ownerId)
-        && data.ownerId == request.auth.uid
-        && data.ownerId == userId
+    function isValidPayment(data, fundId) {
+      return data.keys().hasAll(['fundId', 'memberId', 'monthKey', 'expectedAmount', 'paidAmount', 'status', 'paidDate', 'note', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['fundId', 'memberId', 'monthKey', 'expectedAmount', 'paidAmount', 'status', 'paidDate', 'note', 'lastRemindedAt', 'createdAt', 'updatedAt'])
+        && isValidFundId(data.fundId)
+        && data.fundId == fundId
         && isValidId(data.memberId)
         && isValidMonthKey(data.monthKey)
         && (data.expectedAmount is int || data.expectedAmount is float)
@@ -118,42 +107,38 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
-    // Parent Fund Document (Strictly private to verified owner)
-    match /users/{userId} {
-      allow get: if isVerifiedOwner(userId) && isValidId(userId);
+    // Family Fund Workspace Document (No top-level listing to prevent enumeration)
+    match /funds/{fundId} {
+      allow get: if isValidFundId(fundId);
       allow list: if false;
-      allow create: if isVerifiedOwner(userId)
-        && isValidId(userId)
-        && isValidUserFund(incoming(), userId)
+      allow create: if isValidFundId(fundId)
+        && isValidFund(incoming(), fundId)
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
-      allow update: if isVerifiedOwner(userId)
-        && isValidId(userId)
-        && isValidUserFund(incoming(), userId)
-        && incoming().ownerId == existing().ownerId
+      allow update: if isValidFundId(fundId)
+        && isValidFund(incoming(), fundId)
+        && incoming().fundId == existing().fundId
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
           incoming().diff(existing()).affectedKeys().hasOnly(['fundName', 'currency', 'reminderTemplate', 'updatedAt'])
         );
-      allow delete: if isVerifiedOwner(userId) && isValidId(userId);
+      allow delete: if false;
 
-      // Subcollection: Family Members (PII strictly isolated to verified owner)
+      // Subcollection: Family Members
       match /members/{memberId} {
-        allow get: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(memberId) && fundExists(userId);
-        allow list: if isVerifiedOwner(userId) && resource.data.ownerId == request.auth.uid;
-        allow create: if isVerifiedOwner(userId)
-          && isValidId(userId)
+        allow get: if isValidFundId(fundId) && isValidId(memberId) && fundExists(fundId);
+        allow list: if isValidFundId(fundId) && resource.data.fundId == fundId;
+        allow create: if isValidFundId(fundId)
           && isValidId(memberId)
-          && isValidMember(incoming(), userId)
+          && isValidMember(incoming(), fundId)
           && incoming().createdAt == request.time
           && incoming().updatedAt == request.time
-          && fundExists(userId);
-        allow update: if isVerifiedOwner(userId)
-          && isValidId(userId)
+          && fundExists(fundId);
+        allow update: if isValidFundId(fundId)
           && isValidId(memberId)
-          && isValidMember(incoming(), userId)
-          && incoming().ownerId == existing().ownerId
+          && isValidMember(incoming(), fundId)
+          && incoming().fundId == existing().fundId
           && incoming().createdAt == existing().createdAt
           && incoming().updatedAt == request.time
           && (
@@ -163,29 +148,27 @@ service cloud.firestore {
             // Action: Toggle active status only
             incoming().diff(existing()).affectedKeys().hasOnly(['isActive', 'updatedAt'])
           )
-          && fundExists(userId);
-        allow delete: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(memberId) && fundExists(userId);
+          && fundExists(fundId);
+        allow delete: if isValidFundId(fundId) && isValidId(memberId) && fundExists(fundId);
       }
 
       // Subcollection: Monthly Payments (Master Gate + Member Atomicity Invariant)
       match /payments/{paymentId} {
-        allow get: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(paymentId) && fundExists(userId);
-        allow list: if isVerifiedOwner(userId) && resource.data.ownerId == request.auth.uid;
-        allow create: if isVerifiedOwner(userId)
-          && isValidId(userId)
+        allow get: if isValidFundId(fundId) && isValidId(paymentId) && fundExists(fundId);
+        allow list: if isValidFundId(fundId) && resource.data.fundId == fundId;
+        allow create: if isValidFundId(fundId)
           && isValidId(paymentId)
-          && isValidPayment(incoming(), userId)
+          && isValidPayment(incoming(), fundId)
           && paymentId == incoming().memberId + '_' + incoming().monthKey
           && incoming().createdAt == request.time
           && incoming().updatedAt == request.time
           && (!('lastRemindedAt' in incoming()) || incoming().lastRemindedAt == request.time)
-          && fundExists(userId)
-          && memberExistsAfter(userId, incoming().memberId);
-        allow update: if isVerifiedOwner(userId)
-          && isValidId(userId)
+          && fundExists(fundId)
+          && memberExistsAfter(fundId, incoming().memberId);
+        allow update: if isValidFundId(fundId)
           && isValidId(paymentId)
-          && isValidPayment(incoming(), userId)
-          && incoming().ownerId == existing().ownerId
+          && isValidPayment(incoming(), fundId)
+          && incoming().fundId == existing().fundId
           && incoming().memberId == existing().memberId
           && incoming().monthKey == existing().monthKey
           && incoming().createdAt == existing().createdAt
@@ -200,8 +183,8 @@ service cloud.firestore {
               && incoming().lastRemindedAt == request.time
             )
           )
-          && fundExists(userId);
-        allow delete: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(paymentId) && fundExists(userId);
+          && fundExists(fundId);
+        allow delete: if isValidFundId(fundId) && isValidId(paymentId) && fundExists(fundId);
       }
     }
   }

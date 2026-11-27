@@ -1,15 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { onAuthStateChanged, User } from 'firebase/auth';
 import {
   Bell,
   CalendarCheck2,
   FileBarChart2,
-  LogOut,
   Settings,
   UserPlus,
   Users,
 } from 'lucide-react';
-import { AuthGate } from './components/AuthGate';
 import { LedgerView } from './components/LedgerView';
 import { MemberModal } from './components/MemberModal';
 import { MemberStatementModal } from './components/MemberStatementModal';
@@ -19,26 +16,27 @@ import { RemindersView } from './components/RemindersView';
 import { ReportsView } from './components/ReportsView';
 import { SettingsModal } from './components/SettingsModal';
 import {
-  auth,
   createMember,
   deleteMemberAndPayments,
-  ensureUserFund,
+  ensureFund,
   recordReminderSent,
   saveMonthlyPayment,
   seedSampleFamilyData,
-  signOutUser,
+  subscribeFund,
   subscribeMembers,
   subscribePayments,
-  subscribeUserFund,
   updateFundSettings,
   updateMember,
 } from './firebase';
 import {
   ActiveTab,
+  DEFAULT_FUND_ID,
   DEFAULT_REMINDER_TEMPLATE,
   FamilyMember,
+  FIELD_PATTERNS,
   FIXED_CURRENCY,
   FIXED_CURRENCY_LABEL,
+  FUND_ID_STORAGE_KEY,
   MonthlyPayment,
   UserFund,
 } from './types';
@@ -57,10 +55,20 @@ const TAB_META: Record<ActiveTab, { label: string; shortLabel: string; title: st
   reports: { label: 'التقارير', shortLabel: 'التقارير', title: 'التقارير والمشاركة' },
 };
 
-export default function App() {
-  const [user, setUser] = useState<User | null>(null);
-  const [authReady, setAuthReady] = useState(false);
+function getInitialFundId(): string {
+  try {
+    const saved = window.localStorage.getItem(FUND_ID_STORAGE_KEY);
+    if (saved && FIELD_PATTERNS.FUND_ID.test(saved)) {
+      return saved;
+    }
+  } catch {
+    // Ignore storage read restrictions
+  }
+  return DEFAULT_FUND_ID;
+}
 
+export default function App() {
+  const [fundId, setFundId] = useState<string>(getInitialFundId);
   const [fund, setFund] = useState<UserFund | null>(null);
   const [members, setMembers] = useState<FamilyMember[]>([]);
   const [payments, setPayments] = useState<MonthlyPayment[]>([]);
@@ -90,33 +98,19 @@ export default function App() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  // Listen to Firebase Auth state
+  // Initialize fund document and subscribe directly to real-time Firestore collections (no Google login)
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (firebaseUser) => {
-      setUser(firebaseUser);
-      setAuthReady(true);
-      if (!firebaseUser) {
-        setFund(null);
-        setMembers([]);
-        setPayments([]);
-        setDataLoading(false);
-      }
-    });
-    return () => unsub();
-  }, []);
-
-  // Initialize fund document and subscribe to real-time Firestore collections
-  useEffect(() => {
-    if (!authReady || !user) return;
-
     let cancelled = false;
     let unsubFund: (() => void) | null = null;
     let unsubMembers: (() => void) | null = null;
     let unsubPayments: (() => void) | null = null;
 
     setDataLoading(true);
+    setFund(null);
+    setMembers([]);
+    setPayments([]);
 
-    ensureUserFund(user.uid)
+    ensureFund(fundId)
       .then((initialFund) => {
         if (cancelled) return;
         setFund(initialFund);
@@ -129,8 +123,8 @@ export default function App() {
           }
         };
 
-        unsubFund = subscribeUserFund(
-          user.uid,
+        unsubFund = subscribeFund(
+          fundId,
           (nextFund) => {
             if (nextFund && !cancelled) setFund(nextFund);
           },
@@ -140,7 +134,7 @@ export default function App() {
         );
 
         unsubMembers = subscribeMembers(
-          user.uid,
+          fundId,
           (list) => {
             if (cancelled) return;
             setMembers(list);
@@ -153,7 +147,7 @@ export default function App() {
         );
 
         unsubPayments = subscribePayments(
-          user.uid,
+          fundId,
           (list) => {
             if (cancelled) return;
             setPayments(list);
@@ -177,7 +171,7 @@ export default function App() {
       if (unsubMembers) unsubMembers();
       if (unsubPayments) unsubPayments();
     };
-  }, [authReady, user]);
+  }, [fundId]);
 
   // Count unpaid/partial members for selected month (for clean text indicator in nav)
   const pendingCount = useMemo(() => {
@@ -193,33 +187,27 @@ export default function App() {
     }, 0);
   }, [members, payments, selectedMonth]);
 
-  // Surface Firestore errors to ErrorBoundary
   if (fatalError) {
     throw fatalError;
   }
 
-  if (!authReady) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6" dir="rtl">
-        <div className="text-center space-y-2">
-          <p className="text-lg font-bold font-display text-slate-900">صندوق العائلة</p>
-          <p className="text-sm text-slate-500">جارٍ التحقق من الجلسة...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!user) {
-    return <AuthGate />;
-  }
-
   const activeFund: UserFund = {
-    ownerId: user.uid,
+    fundId,
     fundName: fund?.fundName || 'صندوق العائلة',
     currency: FIXED_CURRENCY,
     reminderTemplate: fund?.reminderTemplate || DEFAULT_REMINDER_TEMPLATE,
     createdAt: fund?.createdAt,
     updatedAt: fund?.updatedAt,
+  };
+
+  const handleChangeFundId = (nextFundId: string) => {
+    try {
+      window.localStorage.setItem(FUND_ID_STORAGE_KEY, nextFundId);
+    } catch {
+      // Ignore storage restrictions
+    }
+    setFundId(nextFundId);
+    showToast(`تم الاتصال بالصندوق: ${nextFundId}`);
   };
 
   // Handlers
@@ -232,22 +220,22 @@ export default function App() {
     isActive: boolean;
   }) => {
     if (editingMember) {
-      await updateMember(user.uid, editingMember.id, data);
+      await updateMember(fundId, editingMember.id, data);
       showToast(`تم تحديث بيانات ${data.name}.`);
     } else {
-      await createMember(user.uid, data);
+      await createMember(fundId, data);
       showToast(`تمت إضافة ${data.name} إلى الصندوق.`);
     }
   };
 
   const handleDeleteMember = async (member: FamilyMember) => {
     const paymentIds = payments.filter((p) => p.memberId === member.id).map((p) => p.id);
-    await deleteMemberAndPayments(user.uid, member.id, paymentIds);
+    await deleteMemberAndPayments(fundId, member.id, paymentIds);
     showToast(`تم حذف ${member.name} وسجلاته.`);
   };
 
   const handleQuickMarkPaid = async (entry: ResolvedMonthEntry) => {
-    await saveMonthlyPayment(user.uid, {
+    await saveMonthlyPayment(fundId, {
       memberId: entry.member.id,
       monthKey: entry.monthKey,
       expectedAmount: entry.expectedAmount,
@@ -270,7 +258,7 @@ export default function App() {
     const existingPayment = payments.find(
       (p) => p.memberId === data.memberId && p.monthKey === data.monthKey
     );
-    await saveMonthlyPayment(user.uid, {
+    await saveMonthlyPayment(fundId, {
       ...data,
       existingPayment,
     });
@@ -279,7 +267,7 @@ export default function App() {
 
   const handleLogReminder = async (entry: ResolvedMonthEntry) => {
     try {
-      await recordReminderSent(user.uid, entry.member, entry.monthKey, entry.payment);
+      await recordReminderSent(fundId, entry.member, entry.monthKey, entry.payment);
     } catch {
       // Reminder link already opened; ignore silent log failure
     }
@@ -289,12 +277,12 @@ export default function App() {
     fundName: string;
     reminderTemplate: string;
   }) => {
-    await updateFundSettings(user.uid, data);
+    await updateFundSettings(fundId, data);
     showToast('تم حفظ إعدادات الصندوق.');
   };
 
   const handleLoadSampleData = async () => {
-    await seedSampleFamilyData(user.uid);
+    await seedSampleFamilyData(fundId);
     showToast('تم تحميل بيانات العائلة التجريبية بنجاح.');
   };
 
@@ -343,7 +331,7 @@ export default function App() {
           })}
         </nav>
 
-        <div className="p-3 border-t border-slate-200 space-y-1">
+        <div className="p-3 border-t border-slate-200">
           <button
             type="button"
             onClick={() => setSettingsOpen(true)}
@@ -352,21 +340,6 @@ export default function App() {
             <Settings className="w-4 h-4 text-slate-400" />
             <span>إعدادات الصندوق</span>
           </button>
-
-          <div className="px-3.5 pt-2 pb-1 flex items-center justify-between gap-2">
-            <span className="text-xs text-slate-500 truncate" dir="ltr">
-              {user.email}
-            </span>
-            <button
-              type="button"
-              onClick={() => void signOutUser()}
-              title="تسجيل الخروج"
-              aria-label="تسجيل الخروج"
-              className="p-2 text-slate-400 hover:text-red-700 rounded-lg transition-colors cursor-pointer shrink-0"
-            >
-              <LogOut className="w-4 h-4" />
-            </button>
-          </div>
         </div>
       </aside>
 
@@ -390,7 +363,7 @@ export default function App() {
               <span>{FIXED_CURRENCY_LABEL}</span>
             </div>
 
-            {/* Zone 3: Single Primary Action (+ mobile settings/signout icons) */}
+            {/* Zone 3: Single Primary Action (+ mobile settings icon) */}
             <div className="flex items-center gap-1.5 shrink-0">
               <button
                 type="button"
@@ -411,15 +384,6 @@ export default function App() {
                 className="lg:hidden min-h-[44px] min-w-[44px] flex items-center justify-center text-slate-600 hover:text-slate-900 rounded-lg cursor-pointer"
               >
                 <Settings className="w-5 h-5" />
-              </button>
-
-              <button
-                type="button"
-                onClick={() => void signOutUser()}
-                aria-label="تسجيل الخروج"
-                className="lg:hidden min-h-[44px] min-w-[44px] flex items-center justify-center text-slate-500 hover:text-red-700 rounded-lg cursor-pointer"
-              >
-                <LogOut className="w-5 h-5" />
               </button>
             </div>
           </div>
@@ -559,8 +523,10 @@ export default function App() {
       <SettingsModal
         isOpen={settingsOpen}
         fund={activeFund}
+        fundId={fundId}
         onClose={() => setSettingsOpen(false)}
         onSave={handleSaveSettings}
+        onChangeFundId={handleChangeFundId}
       />
 
       {/* Quiet Toast Feedback */}

@@ -1,8 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { RotateCcw, X } from 'lucide-react';
 import {
+  DEFAULT_FUND_ID,
   DEFAULT_REMINDER_TEMPLATE,
   FIELD_LIMITS,
+  FIELD_PATTERNS,
   FIXED_CURRENCY_LABEL,
   UserFund,
 } from '../types';
@@ -10,11 +12,13 @@ import {
 interface SettingsModalProps {
   isOpen: boolean;
   fund: UserFund;
+  fundId: string;
   onClose: () => void;
   onSave: (data: {
     fundName: string;
     reminderTemplate: string;
   }) => Promise<void>;
+  onChangeFundId: (nextFundId: string) => void;
 }
 
 const TEMPLATE_TOKENS = [
@@ -29,11 +33,14 @@ const TEMPLATE_TOKENS = [
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   fund,
+  fundId,
   onClose,
   onSave,
+  onChangeFundId,
 }) => {
   const [fundName, setFundName] = useState(fund.fundName);
   const [reminderTemplate, setReminderTemplate] = useState(fund.reminderTemplate);
+  const [syncCode, setSyncCode] = useState(fundId);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -41,14 +48,27 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     if (!isOpen) return;
     setFundName(fund.fundName);
     setReminderTemplate(fund.reminderTemplate);
+    setSyncCode(fundId);
     setError(null);
-  }, [isOpen, fund]);
+  }, [isOpen, fund, fundId]);
 
   if (!isOpen) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    const trimmedCode = syncCode.trim();
+    if (!FIELD_PATTERNS.FUND_ID.test(trimmedCode)) {
+      setError('رمز المزامنة يجب أن يكون من 6 إلى 64 حرفاً إنجليزياً أو أرقاماً أو (-) أو (_) بدون مسافات.');
+      return;
+    }
+
+    if (trimmedCode !== fundId) {
+      onChangeFundId(trimmedCode);
+      onClose();
+      return;
+    }
+
     if (!fundName.trim()) {
       setError('يرجى إدخال اسم الصندوق.');
       return;
@@ -174,13 +194,44 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
 
+          <div className="pt-4 border-t border-slate-200">
+            <div className="flex items-center justify-between mb-1.5">
+              <label htmlFor="sync-code" className="text-sm font-medium text-slate-700">
+                رمز الصندوق للمزامنة بين الأجهزة
+              </label>
+              {syncCode !== DEFAULT_FUND_ID && (
+                <button
+                  type="button"
+                  onClick={() => setSyncCode(DEFAULT_FUND_ID)}
+                  className="text-xs text-slate-500 hover:text-slate-900 cursor-pointer"
+                >
+                  الافتراضي
+                </button>
+              )}
+            </div>
+            <input
+              id="sync-code"
+              type="text"
+              maxLength={FIELD_LIMITS.FUND_ID_MAX}
+              value={syncCode}
+              onChange={(e) => setSyncCode(e.target.value)}
+              dir="ltr"
+              placeholder={DEFAULT_FUND_ID}
+              className="w-full h-11 px-3.5 rounded-lg border border-slate-300 text-sm font-mono text-left text-slate-900 focus:outline-none focus:ring-2 focus:ring-teal-600/20 focus:border-teal-700"
+            />
+            <p className="text-xs text-slate-500 mt-1.5 leading-relaxed">
+              تتزامن بياناتك تلقائياً بين الكمبيوتر والهاتف باستخدام نفس الرمز. يمكنك تغييره إلى رمز
+              خاص بعائلتك (حروف إنجليزية وأرقام فقط) ثم إدخاله في أجهزتك الأخرى.
+            </p>
+          </div>
+
           <div className="pt-2 flex items-center gap-3 sticky bottom-0 bg-white pb-safe">
             <button
               type="submit"
               disabled={saving}
               className="flex-1 h-12 bg-teal-700 hover:bg-teal-800 disabled:opacity-60 text-white text-sm font-semibold rounded-xl transition-colors cursor-pointer"
             >
-              {saving ? 'جارٍ الحفظ...' : 'حفظ الإعدادات'}
+              {saving ? 'جارٍ الحفظ...' : syncCode.trim() !== fundId ? 'تبديل رمز الصندوق' : 'حفظ الإعدادات'}
             </button>
             <button
               type="button"

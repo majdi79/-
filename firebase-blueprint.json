@@ -1,15 +1,15 @@
 {
   "entities": {
-    "UserFund": {
-      "title": "UserFund",
-      "description": "Configuration and profile for a family contribution fund owned by a single authenticated treasurer.",
+    "FamilyFund": {
+      "title": "FamilyFund",
+      "description": "Configuration for a family contribution fund synced across devices by fundId.",
       "type": "object",
       "properties": {
-        "ownerId": {
+        "fundId": {
           "type": "string",
-          "description": "Firebase Auth UID of the fund owner.",
-          "minLength": 1,
-          "maxLength": 128,
+          "description": "Workspace identifier of the family fund.",
+          "minLength": 6,
+          "maxLength": 64,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
         "fundName": {
@@ -20,7 +20,7 @@
         },
         "currency": {
           "type": "string",
-          "description": "Short currency symbol or code displayed next to monetary amounts.",
+          "description": "Fixed currency symbol (Bahraini Dinar د.ب).",
           "minLength": 1,
           "maxLength": 12
         },
@@ -41,18 +41,18 @@
           "description": "Server timestamp when the fund settings were last updated."
         }
       },
-      "required": ["ownerId", "fundName", "currency", "reminderTemplate", "createdAt", "updatedAt"]
+      "required": ["fundId", "fundName", "currency", "reminderTemplate", "createdAt", "updatedAt"]
     },
     "FamilyMember": {
       "title": "FamilyMember",
-      "description": "A family member participating in the monthly contribution fund with a pre-allocated monthly amount.",
+      "description": "A family member participating in the monthly contribution fund with a pre-allocated monthly amount in BHD.",
       "type": "object",
       "properties": {
-        "ownerId": {
+        "fundId": {
           "type": "string",
-          "description": "Firebase Auth UID of the fund owner.",
-          "minLength": 1,
-          "maxLength": 128,
+          "description": "Parent FamilyFund workspace identifier.",
+          "minLength": 6,
+          "maxLength": 64,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
         "name": {
@@ -76,7 +76,7 @@
         },
         "monthlyAmount": {
           "type": "number",
-          "description": "Pre-allocated monthly contribution amount (non-negative, up to 1,000,000)."
+          "description": "Pre-allocated monthly contribution amount in BHD (non-negative, up to 1,000,000)."
         },
         "startMonth": {
           "type": "string",
@@ -100,18 +100,18 @@
           "description": "Server timestamp when the member record was last updated."
         }
       },
-      "required": ["ownerId", "name", "phone", "relation", "monthlyAmount", "startMonth", "isActive", "createdAt", "updatedAt"]
+      "required": ["fundId", "name", "phone", "relation", "monthlyAmount", "startMonth", "isActive", "createdAt", "updatedAt"]
     },
     "MonthlyPayment": {
       "title": "MonthlyPayment",
       "description": "A payment record for a specific family member in a specific calendar month (document ID: memberId_YYYY-MM).",
       "type": "object",
       "properties": {
-        "ownerId": {
+        "fundId": {
           "type": "string",
-          "description": "Firebase Auth UID of the fund owner.",
-          "minLength": 1,
-          "maxLength": 128,
+          "description": "Parent FamilyFund workspace identifier.",
+          "minLength": 6,
+          "maxLength": 64,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
         "memberId": {
@@ -130,11 +130,11 @@
         },
         "expectedAmount": {
           "type": "number",
-          "description": "Expected monthly contribution snapshot for this month."
+          "description": "Expected monthly contribution snapshot in BHD."
         },
         "paidAmount": {
           "type": "number",
-          "description": "Amount actually paid for this month."
+          "description": "Amount actually paid in BHD."
         },
         "status": {
           "type": "string",
@@ -170,21 +170,21 @@
           "description": "Server timestamp when the payment record was last updated."
         }
       },
-      "required": ["ownerId", "memberId", "monthKey", "expectedAmount", "paidAmount", "status", "paidDate", "note", "createdAt", "updatedAt"]
+      "required": ["fundId", "memberId", "monthKey", "expectedAmount", "paidAmount", "status", "paidDate", "note", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
-    "/users/{userId}": {
-      "schema": { "$ref": "#/entities/UserFund" },
-      "description": "Private family fund configuration document owned strictly by the authenticated user."
+    "/funds/{fundId}": {
+      "schema": { "$ref": "#/entities/FamilyFund" },
+      "description": "Family fund workspace document synced across desktop and phone without Google sign-in."
     },
-    "/users/{userId}/members/{memberId}": {
+    "/funds/{fundId}/members/{memberId}": {
       "schema": { "$ref": "#/entities/FamilyMember" },
-      "description": "Family members belonging to the user's fund, containing PII (name, phone) restricted to the fund owner."
+      "description": "Family members belonging to the fund."
     },
-    "/users/{userId}/payments/{paymentId}": {
+    "/funds/{fundId}/payments/{paymentId}": {
       "schema": { "$ref": "#/entities/MonthlyPayment" },
-      "description": "Monthly payment ledger records linked to members in the user's fund."
+      "description": "Monthly payment ledger records linked to members in the fund."
     }
   }
 }
