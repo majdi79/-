@@ -1,10 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { RotateCcw, X } from 'lucide-react';
+import { Check, KeyRound, RotateCcw, X } from 'lucide-react';
+import { changeUserPassword, mapAuthErrorToArabic } from '../firebase';
 import {
-  DEFAULT_FUND_ID,
   DEFAULT_REMINDER_TEMPLATE,
   FIELD_LIMITS,
-  FIELD_PATTERNS,
   FIXED_CURRENCY_LABEL,
   UserFund,
 } from '../types';
@@ -12,13 +11,12 @@ import {
 interface SettingsModalProps {
   isOpen: boolean;
   fund: UserFund;
-  fundId: string;
+  username: string;
   onClose: () => void;
   onSave: (data: {
     fundName: string;
     reminderTemplate: string;
   }) => Promise<void>;
-  onChangeFundId: (nextFundId: string) => void;
 }
 
 const TEMPLATE_TOKENS = [
@@ -33,42 +31,42 @@ const TEMPLATE_TOKENS = [
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   fund,
-  fundId,
+  username,
   onClose,
   onSave,
-  onChangeFundId,
 }) => {
   const [fundName, setFundName] = useState(fund.fundName);
   const [reminderTemplate, setReminderTemplate] = useState(fund.reminderTemplate);
-  const [syncCode, setSyncCode] = useState(fundId);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Change password section state
+  const [showPasswordForm, setShowPasswordForm] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const [changingPassword, setChangingPassword] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordSuccess, setPasswordSuccess] = useState(false);
 
   useEffect(() => {
     if (!isOpen) return;
     setFundName(fund.fundName);
     setReminderTemplate(fund.reminderTemplate);
-    setSyncCode(fundId);
     setError(null);
-  }, [isOpen, fund, fundId]);
+    setShowPasswordForm(false);
+    setCurrentPassword('');
+    setNewPassword('');
+    setConfirmNewPassword('');
+    setPasswordError(null);
+    setPasswordSuccess(false);
+  }, [isOpen, fund]);
 
   if (!isOpen) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    const trimmedCode = syncCode.trim();
-    if (!FIELD_PATTERNS.FUND_ID.test(trimmedCode)) {
-      setError('رمز المزامنة يجب أن يكون من 6 إلى 64 حرفاً إنجليزياً أو أرقاماً أو (-) أو (_) بدون مسافات.');
-      return;
-    }
-
-    if (trimmedCode !== fundId) {
-      onChangeFundId(trimmedCode);
-      onClose();
-      return;
-    }
-
     if (!fundName.trim()) {
       setError('يرجى إدخال اسم الصندوق.');
       return;
@@ -87,11 +85,41 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
+  const handlePasswordUpdate = async () => {
+    setPasswordError(null);
+    setPasswordSuccess(false);
+    if (!currentPassword) {
+      setPasswordError('يرجى إدخال كلمة المرور الحالية.');
+      return;
+    }
+    if (newPassword.length < FIELD_LIMITS.PASSWORD_MIN) {
+      setPasswordError(`كلمة المرور الجديدة يجب أن تكون ${FIELD_LIMITS.PASSWORD_MIN} أحرف على الأقل.`);
+      return;
+    }
+    if (newPassword !== confirmNewPassword) {
+      setPasswordError('كلمتا المرور الجديدتان غير متطابقتين.');
+      return;
+    }
+
+    setChangingPassword(true);
+    try {
+      await changeUserPassword(currentPassword, newPassword);
+      setPasswordSuccess(true);
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmNewPassword('');
+    } catch (err) {
+      setPasswordError(mapAuthErrorToArabic(err).message);
+    } finally {
+      setChangingPassword(false);
+    }
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/50 backdrop-blur-[2px] p-0 sm:p-4"
       onClick={(e) => {
-        if (e.target === e.currentTarget && !saving) onClose();
+        if (e.target === e.currentTarget && !saving && !changingPassword) onClose();
       }}
     >
       <div
@@ -104,12 +132,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
         <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-4">
           <h2 id="settings-modal-title" className="text-lg font-bold font-display text-slate-900">
-            إعدادات الصندوق والرسائل
+            إعدادات الصندوق والحساب
           </h2>
           <button
             type="button"
             onClick={onClose}
-            disabled={saving}
+            disabled={saving || changingPassword}
             aria-label="إغلاق"
             className="min-h-[44px] min-w-[44px] flex items-center justify-center text-slate-500 hover:text-slate-900 rounded-lg transition-colors cursor-pointer"
           >
@@ -123,6 +151,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {error}
             </div>
           )}
+
+          <div className="bg-slate-50 border border-slate-200 rounded-xl divide-y divide-slate-200 text-sm">
+            <div className="flex items-center justify-between py-3 px-4">
+              <span className="text-slate-600">اسم المستخدم</span>
+              <span className="font-mono font-semibold text-slate-900" dir="ltr">
+                {username}
+              </span>
+            </div>
+            <div className="flex items-center justify-between py-3 px-4">
+              <span className="text-slate-600">العملة المعتمدة</span>
+              <span className="font-semibold text-slate-900">{FIXED_CURRENCY_LABEL}</span>
+            </div>
+          </div>
 
           <div>
             <label htmlFor="fund-name" className="block text-sm font-medium text-slate-700 mb-1.5">
@@ -138,11 +179,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               placeholder="مثال: صندوق عائلة آل محمد"
               className="w-full h-11 px-3.5 rounded-lg border border-slate-300 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-teal-600/20 focus:border-teal-700"
             />
-          </div>
-
-          <div className="flex items-center justify-between py-3 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm">
-            <span className="text-slate-600">العملة المعتمدة</span>
-            <span className="font-semibold text-slate-900">{FIXED_CURRENCY_LABEL}</span>
           </div>
 
           <div>
@@ -194,35 +230,85 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
 
-          <div className="pt-4 border-t border-slate-200">
-            <div className="flex items-center justify-between mb-1.5">
-              <label htmlFor="sync-code" className="text-sm font-medium text-slate-700">
-                رمز الصندوق للمزامنة بين الأجهزة
-              </label>
-              {syncCode !== DEFAULT_FUND_ID && (
+          {/* Change Password Section */}
+          <div className="pt-4 border-t border-slate-200 space-y-3">
+            <button
+              type="button"
+              onClick={() => {
+                setShowPasswordForm((v) => !v);
+                setPasswordError(null);
+                setPasswordSuccess(false);
+              }}
+              className="inline-flex items-center gap-2 text-sm font-medium text-teal-800 hover:text-teal-900 cursor-pointer"
+            >
+              <KeyRound className="w-4 h-4" />
+              <span>{showPasswordForm ? 'إخفاء تغيير كلمة المرور' : 'تغيير كلمة المرور'}</span>
+            </button>
+
+            {showPasswordForm && (
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+                {passwordError && (
+                  <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                    {passwordError}
+                  </p>
+                )}
+                {passwordSuccess && (
+                  <p className="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 flex items-center gap-1.5">
+                    <Check className="w-4 h-4 shrink-0" />
+                    <span>تم تحديث كلمة المرور بنجاح.</span>
+                  </p>
+                )}
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">
+                    كلمة المرور الحالية
+                  </label>
+                  <input
+                    type="password"
+                    value={currentPassword}
+                    onChange={(e) => setCurrentPassword(e.target.value)}
+                    dir="ltr"
+                    className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm text-left"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">
+                      كلمة المرور الجديدة
+                    </label>
+                    <input
+                      type="password"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      dir="ltr"
+                      className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm text-left"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">
+                      تأكيد الجديدة
+                    </label>
+                    <input
+                      type="password"
+                      value={confirmNewPassword}
+                      onChange={(e) => setConfirmNewPassword(e.target.value)}
+                      dir="ltr"
+                      className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm text-left"
+                    />
+                  </div>
+                </div>
+
                 <button
                   type="button"
-                  onClick={() => setSyncCode(DEFAULT_FUND_ID)}
-                  className="text-xs text-slate-500 hover:text-slate-900 cursor-pointer"
+                  onClick={() => void handlePasswordUpdate()}
+                  disabled={changingPassword}
+                  className="h-10 px-4 bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
                 >
-                  الافتراضي
+                  {changingPassword ? 'جارٍ التحديث...' : 'تحديث كلمة المرور'}
                 </button>
-              )}
-            </div>
-            <input
-              id="sync-code"
-              type="text"
-              maxLength={FIELD_LIMITS.FUND_ID_MAX}
-              value={syncCode}
-              onChange={(e) => setSyncCode(e.target.value)}
-              dir="ltr"
-              placeholder={DEFAULT_FUND_ID}
-              className="w-full h-11 px-3.5 rounded-lg border border-slate-300 text-sm font-mono text-left text-slate-900 focus:outline-none focus:ring-2 focus:ring-teal-600/20 focus:border-teal-700"
-            />
-            <p className="text-xs text-slate-500 mt-1.5 leading-relaxed">
-              تتزامن بياناتك تلقائياً بين الكمبيوتر والهاتف باستخدام نفس الرمز. يمكنك تغييره إلى رمز
-              خاص بعائلتك (حروف إنجليزية وأرقام فقط) ثم إدخاله في أجهزتك الأخرى.
-            </p>
+              </div>
+            )}
           </div>
 
           <div className="pt-2 flex items-center gap-3 sticky bottom-0 bg-white pb-safe">
@@ -231,7 +317,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               disabled={saving}
               className="flex-1 h-12 bg-teal-700 hover:bg-teal-800 disabled:opacity-60 text-white text-sm font-semibold rounded-xl transition-colors cursor-pointer"
             >
-              {saving ? 'جارٍ الحفظ...' : syncCode.trim() !== fundId ? 'تبديل رمز الصندوق' : 'حفظ الإعدادات'}
+              {saving ? 'جارٍ الحفظ...' : 'حفظ الإعدادات'}
             </button>
             <button
               type="button"

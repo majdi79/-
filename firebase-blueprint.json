@@ -1,16 +1,22 @@
 {
   "entities": {
-    "FamilyFund": {
-      "title": "FamilyFund",
-      "description": "Configuration for a family contribution fund synced across devices by fundId.",
+    "UserFund": {
+      "title": "UserFund",
+      "description": "Configuration for a private family contribution fund owned by an authenticated username/password user.",
       "type": "object",
       "properties": {
-        "fundId": {
+        "ownerId": {
           "type": "string",
-          "description": "Workspace identifier of the family fund.",
-          "minLength": 6,
-          "maxLength": 64,
+          "description": "Firebase Auth UID of the fund owner.",
+          "minLength": 1,
+          "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "username": {
+          "type": "string",
+          "description": "Account username displayed in the app.",
+          "minLength": 1,
+          "maxLength": 64
         },
         "fundName": {
           "type": "string",
@@ -41,18 +47,18 @@
           "description": "Server timestamp when the fund settings were last updated."
         }
       },
-      "required": ["fundId", "fundName", "currency", "reminderTemplate", "createdAt", "updatedAt"]
+      "required": ["ownerId", "username", "fundName", "currency", "reminderTemplate", "createdAt", "updatedAt"]
     },
     "FamilyMember": {
       "title": "FamilyMember",
       "description": "A family member participating in the monthly contribution fund with a pre-allocated monthly amount in BHD.",
       "type": "object",
       "properties": {
-        "fundId": {
+        "ownerId": {
           "type": "string",
-          "description": "Parent FamilyFund workspace identifier.",
-          "minLength": 6,
-          "maxLength": 64,
+          "description": "Firebase Auth UID of the fund owner.",
+          "minLength": 1,
+          "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
         "name": {
@@ -100,18 +106,18 @@
           "description": "Server timestamp when the member record was last updated."
         }
       },
-      "required": ["fundId", "name", "phone", "relation", "monthlyAmount", "startMonth", "isActive", "createdAt", "updatedAt"]
+      "required": ["ownerId", "name", "phone", "relation", "monthlyAmount", "startMonth", "isActive", "createdAt", "updatedAt"]
     },
     "MonthlyPayment": {
       "title": "MonthlyPayment",
       "description": "A payment record for a specific family member in a specific calendar month (document ID: memberId_YYYY-MM).",
       "type": "object",
       "properties": {
-        "fundId": {
+        "ownerId": {
           "type": "string",
-          "description": "Parent FamilyFund workspace identifier.",
-          "minLength": 6,
-          "maxLength": 64,
+          "description": "Firebase Auth UID of the fund owner.",
+          "minLength": 1,
+          "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
         "memberId": {
@@ -170,21 +176,21 @@
           "description": "Server timestamp when the payment record was last updated."
         }
       },
-      "required": ["fundId", "memberId", "monthKey", "expectedAmount", "paidAmount", "status", "paidDate", "note", "createdAt", "updatedAt"]
+      "required": ["ownerId", "memberId", "monthKey", "expectedAmount", "paidAmount", "status", "paidDate", "note", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
-    "/funds/{fundId}": {
-      "schema": { "$ref": "#/entities/FamilyFund" },
-      "description": "Family fund workspace document synced across desktop and phone without Google sign-in."
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserFund" },
+      "description": "Private family fund configuration document owned strictly by the authenticated user."
     },
-    "/funds/{fundId}/members/{memberId}": {
+    "/users/{userId}/members/{memberId}": {
       "schema": { "$ref": "#/entities/FamilyMember" },
-      "description": "Family members belonging to the fund."
+      "description": "Family members belonging to the authenticated user's fund (PII strictly owner-isolated)."
     },
-    "/funds/{fundId}/payments/{paymentId}": {
+    "/users/{userId}/payments/{paymentId}": {
       "schema": { "$ref": "#/entities/MonthlyPayment" },
-      "description": "Monthly payment ledger records linked to members in the fund."
+      "description": "Monthly payment ledger records linked to members in the authenticated user's fund."
     }
   }
 }

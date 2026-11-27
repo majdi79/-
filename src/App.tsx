@@ -1,13 +1,16 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { onAuthStateChanged, User } from 'firebase/auth';
 import {
   Bell,
   CalendarCheck2,
   FileBarChart2,
+  LogOut,
   Settings,
   UserPlus,
   Users,
 } from 'lucide-react';
 import { LedgerView } from './components/LedgerView';
+import { LoginView } from './components/LoginView';
 import { MemberModal } from './components/MemberModal';
 import { MemberStatementModal } from './components/MemberStatementModal';
 import { MembersView } from './components/MembersView';
@@ -16,27 +19,28 @@ import { RemindersView } from './components/RemindersView';
 import { ReportsView } from './components/ReportsView';
 import { SettingsModal } from './components/SettingsModal';
 import {
+  auth,
   createMember,
   deleteMemberAndPayments,
-  ensureFund,
+  ensureUserFund,
+  extractDisplayUsername,
+  isPasswordAuthenticatedUser,
   recordReminderSent,
   saveMonthlyPayment,
   seedSampleFamilyData,
-  subscribeFund,
+  signOutUser,
   subscribeMembers,
   subscribePayments,
+  subscribeUserFund,
   updateFundSettings,
   updateMember,
 } from './firebase';
 import {
   ActiveTab,
-  DEFAULT_FUND_ID,
   DEFAULT_REMINDER_TEMPLATE,
   FamilyMember,
-  FIELD_PATTERNS,
   FIXED_CURRENCY,
   FIXED_CURRENCY_LABEL,
-  FUND_ID_STORAGE_KEY,
   MonthlyPayment,
   UserFund,
 } from './types';
@@ -55,20 +59,10 @@ const TAB_META: Record<ActiveTab, { label: string; shortLabel: string; title: st
   reports: { label: 'التقارير', shortLabel: 'التقارير', title: 'التقارير والمشاركة' },
 };
 
-function getInitialFundId(): string {
-  try {
-    const saved = window.localStorage.getItem(FUND_ID_STORAGE_KEY);
-    if (saved && FIELD_PATTERNS.FUND_ID.test(saved)) {
-      return saved;
-    }
-  } catch {
-    // Ignore storage read restrictions
-  }
-  return DEFAULT_FUND_ID;
-}
-
 export default function App() {
-  const [fundId, setFundId] = useState<string>(getInitialFundId);
+  const [user, setUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+
   const [fund, setFund] = useState<UserFund | null>(null);
   const [members, setMembers] = useState<FamilyMember[]>([]);
   const [payments, setPayments] = useState<MonthlyPayment[]>([]);
@@ -98,19 +92,42 @@ export default function App() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  // Initialize fund document and subscribe directly to real-time Firestore collections (no Google login)
+  // Listen to Firebase Auth state (only username/password sessions; sign out legacy Google sessions)
   useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (firebaseUser) => {
+      if (firebaseUser && !isPasswordAuthenticatedUser(firebaseUser)) {
+        void signOutUser();
+        setUser(null);
+        setAuthReady(true);
+        setDataLoading(false);
+        return;
+      }
+
+      setUser(firebaseUser);
+      setAuthReady(true);
+      if (!firebaseUser) {
+        setFund(null);
+        setMembers([]);
+        setPayments([]);
+        setDataLoading(false);
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  // Initialize fund document and subscribe to real-time Firestore collections after login
+  useEffect(() => {
+    if (!authReady || !user) return;
+
     let cancelled = false;
     let unsubFund: (() => void) | null = null;
     let unsubMembers: (() => void) | null = null;
     let unsubPayments: (() => void) | null = null;
 
+    const displayUsername = extractDisplayUsername(user);
     setDataLoading(true);
-    setFund(null);
-    setMembers([]);
-    setPayments([]);
 
-    ensureFund(fundId)
+    ensureUserFund(user.uid, displayUsername)
       .then((initialFund) => {
         if (cancelled) return;
         setFund(initialFund);
@@ -123,8 +140,8 @@ export default function App() {
           }
         };
 
-        unsubFund = subscribeFund(
-          fundId,
+        unsubFund = subscribeUserFund(
+          user.uid,
           (nextFund) => {
             if (nextFund && !cancelled) setFund(nextFund);
           },
@@ -134,7 +151,7 @@ export default function App() {
         );
 
         unsubMembers = subscribeMembers(
-          fundId,
+          user.uid,
           (list) => {
             if (cancelled) return;
             setMembers(list);
@@ -147,7 +164,7 @@ export default function App() {
         );
 
         unsubPayments = subscribePayments(
-          fundId,
+          user.uid,
           (list) => {
             if (cancelled) return;
             setPayments(list);
@@ -171,7 +188,7 @@ export default function App() {
       if (unsubMembers) unsubMembers();
       if (unsubPayments) unsubPayments();
     };
-  }, [fundId]);
+  }, [authReady, user]);
 
   // Count unpaid/partial members for selected month (for clean text indicator in nav)
   const pendingCount = useMemo(() => {
@@ -191,23 +208,31 @@ export default function App() {
     throw fatalError;
   }
 
+  if (!authReady) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6" dir="rtl">
+        <div className="text-center space-y-2">
+          <p className="text-lg font-bold font-display text-slate-900">صندوق العائلة</p>
+          <p className="text-sm text-slate-500">جارٍ التحقق من الجلسة...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <LoginView />;
+  }
+
+  const displayUsername = extractDisplayUsername(user);
+
   const activeFund: UserFund = {
-    fundId,
+    ownerId: user.uid,
+    username: fund?.username || displayUsername,
     fundName: fund?.fundName || 'صندوق العائلة',
     currency: FIXED_CURRENCY,
     reminderTemplate: fund?.reminderTemplate || DEFAULT_REMINDER_TEMPLATE,
     createdAt: fund?.createdAt,
     updatedAt: fund?.updatedAt,
-  };
-
-  const handleChangeFundId = (nextFundId: string) => {
-    try {
-      window.localStorage.setItem(FUND_ID_STORAGE_KEY, nextFundId);
-    } catch {
-      // Ignore storage restrictions
-    }
-    setFundId(nextFundId);
-    showToast(`تم الاتصال بالصندوق: ${nextFundId}`);
   };
 
   // Handlers
@@ -220,22 +245,22 @@ export default function App() {
     isActive: boolean;
   }) => {
     if (editingMember) {
-      await updateMember(fundId, editingMember.id, data);
+      await updateMember(user.uid, editingMember.id, data);
       showToast(`تم تحديث بيانات ${data.name}.`);
     } else {
-      await createMember(fundId, data);
+      await createMember(user.uid, data);
       showToast(`تمت إضافة ${data.name} إلى الصندوق.`);
     }
   };
 
   const handleDeleteMember = async (member: FamilyMember) => {
     const paymentIds = payments.filter((p) => p.memberId === member.id).map((p) => p.id);
-    await deleteMemberAndPayments(fundId, member.id, paymentIds);
+    await deleteMemberAndPayments(user.uid, member.id, paymentIds);
     showToast(`تم حذف ${member.name} وسجلاته.`);
   };
 
   const handleQuickMarkPaid = async (entry: ResolvedMonthEntry) => {
-    await saveMonthlyPayment(fundId, {
+    await saveMonthlyPayment(user.uid, {
       memberId: entry.member.id,
       monthKey: entry.monthKey,
       expectedAmount: entry.expectedAmount,
@@ -258,7 +283,7 @@ export default function App() {
     const existingPayment = payments.find(
       (p) => p.memberId === data.memberId && p.monthKey === data.monthKey
     );
-    await saveMonthlyPayment(fundId, {
+    await saveMonthlyPayment(user.uid, {
       ...data,
       existingPayment,
     });
@@ -267,7 +292,7 @@ export default function App() {
 
   const handleLogReminder = async (entry: ResolvedMonthEntry) => {
     try {
-      await recordReminderSent(fundId, entry.member, entry.monthKey, entry.payment);
+      await recordReminderSent(user.uid, entry.member, entry.monthKey, entry.payment);
     } catch {
       // Reminder link already opened; ignore silent log failure
     }
@@ -277,12 +302,12 @@ export default function App() {
     fundName: string;
     reminderTemplate: string;
   }) => {
-    await updateFundSettings(fundId, data);
+    await updateFundSettings(user.uid, data);
     showToast('تم حفظ إعدادات الصندوق.');
   };
 
   const handleLoadSampleData = async () => {
-    await seedSampleFamilyData(fundId);
+    await seedSampleFamilyData(user.uid);
     showToast('تم تحميل بيانات العائلة التجريبية بنجاح.');
   };
 
@@ -331,7 +356,7 @@ export default function App() {
           })}
         </nav>
 
-        <div className="p-3 border-t border-slate-200">
+        <div className="p-3 border-t border-slate-200 space-y-1">
           <button
             type="button"
             onClick={() => setSettingsOpen(true)}
@@ -340,6 +365,21 @@ export default function App() {
             <Settings className="w-4 h-4 text-slate-400" />
             <span>إعدادات الصندوق</span>
           </button>
+
+          <div className="px-3.5 pt-2 pb-1 flex items-center justify-between gap-2">
+            <span className="text-xs font-mono text-slate-500 truncate" dir="ltr">
+              {displayUsername}
+            </span>
+            <button
+              type="button"
+              onClick={() => void signOutUser()}
+              title="تسجيل الخروج"
+              aria-label="تسجيل الخروج"
+              className="p-2 text-slate-400 hover:text-red-700 rounded-lg transition-colors cursor-pointer shrink-0"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
         </div>
       </aside>
 
@@ -363,7 +403,7 @@ export default function App() {
               <span>{FIXED_CURRENCY_LABEL}</span>
             </div>
 
-            {/* Zone 3: Single Primary Action (+ mobile settings icon) */}
+            {/* Zone 3: Single Primary Action (+ mobile settings & logout icons) */}
             <div className="flex items-center gap-1.5 shrink-0">
               <button
                 type="button"
@@ -384,6 +424,15 @@ export default function App() {
                 className="lg:hidden min-h-[44px] min-w-[44px] flex items-center justify-center text-slate-600 hover:text-slate-900 rounded-lg cursor-pointer"
               >
                 <Settings className="w-5 h-5" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => void signOutUser()}
+                aria-label="تسجيل الخروج"
+                className="lg:hidden min-h-[44px] min-w-[44px] flex items-center justify-center text-slate-500 hover:text-red-700 rounded-lg cursor-pointer"
+              >
+                <LogOut className="w-5 h-5" />
               </button>
             </div>
           </div>
@@ -523,10 +572,9 @@ export default function App() {
       <SettingsModal
         isOpen={settingsOpen}
         fund={activeFund}
-        fundId={fundId}
+        username={displayUsername}
         onClose={() => setSettingsOpen(false)}
         onSave={handleSaveSettings}
-        onChangeFundId={handleChangeFundId}
       />
 
       {/* Quiet Toast Feedback */}

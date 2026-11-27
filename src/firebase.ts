@@ -1,5 +1,14 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth } from 'firebase/auth';
+import {
+  createUserWithEmailAndPassword,
+  EmailAuthProvider,
+  getAuth,
+  reauthenticateWithCredential,
+  signInWithEmailAndPassword,
+  signOut,
+  updatePassword,
+  User,
+} from 'firebase/auth';
 import {
   collection,
   deleteDoc,
@@ -41,6 +50,8 @@ export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 export const firebaseProjectId = firebaseConfig.projectId;
 export const firestoreDatabaseId = firebaseConfig.firestoreDatabaseId;
+
+const SYNTHETIC_EMAIL_DOMAIN = '@familyfund.local';
 
 export enum OperationType {
   CREATE = 'create',
@@ -105,6 +116,120 @@ async function testConnection(): Promise<void> {
 }
 testConnection();
 
+/**
+ * Converts a username (or email) into the normalized email identifier used by Firebase Email/Password auth.
+ */
+export function normalizeUsernameInput(raw: string): string {
+  return raw.trim().toLowerCase();
+}
+
+export function usernameToAuthEmail(usernameOrEmail: string): string {
+  const cleaned = normalizeUsernameInput(usernameOrEmail);
+  if (cleaned.includes('@')) {
+    return cleaned;
+  }
+  return `${cleaned}${SYNTHETIC_EMAIL_DOMAIN}`;
+}
+
+export function extractDisplayUsername(user: User | null): string {
+  const email = user?.email || '';
+  if (!email) return 'مستخدم';
+  if (email.endsWith(SYNTHETIC_EMAIL_DOMAIN)) {
+    return email.slice(0, -SYNTHETIC_EMAIL_DOMAIN.length);
+  }
+  return email;
+}
+
+export function isPasswordAuthenticatedUser(user: User | null): boolean {
+  if (!user) return false;
+  return user.providerData.some((p) => p.providerId === 'password');
+}
+
+export interface AuthActionError {
+  message: string;
+  needsConsoleEnable?: boolean;
+}
+
+export function mapAuthErrorToArabic(error: unknown): AuthActionError {
+  const code =
+    typeof error === 'object' && error !== null && 'code' in error
+      ? String((error as { code?: unknown }).code)
+      : '';
+
+  switch (code) {
+    case 'auth/operation-not-allowed':
+      return {
+        message: 'مزود الدخول بالبريد/كلمة المرور غير مفعّل بعد في لوحة تحكم Firebase.',
+        needsConsoleEnable: true,
+      };
+    case 'auth/invalid-credential':
+    case 'auth/wrong-password':
+    case 'auth/user-not-found':
+      return {
+        message: 'اسم المستخدم أو كلمة المرور غير صحيحة.',
+      };
+    case 'auth/email-already-in-use':
+      return {
+        message: 'اسم المستخدم هذا مستخدم بالفعل. يرجى اختيار اسم مستخدم آخر أو تسجيل الدخول.',
+      };
+    case 'auth/weak-password':
+      return {
+        message: 'كلمة المرور ضعيفة جداً. يجب أن تتكون من 6 أحرف على الأقل.',
+      };
+    case 'auth/invalid-email':
+      return {
+        message: 'اسم المستخدم غير صالح. استخدم حروفاً إنجليزية وأرقاماً فقط بدون مسافات.',
+      };
+    case 'auth/too-many-requests':
+      return {
+        message: 'تم تجاوز عدد المحاولات المسموح بها مؤقتاً. يرجى الانتظار قليلاً ثم المحاولة مجدداً.',
+      };
+    case 'auth/network-request-failed':
+      return {
+        message: 'تعذّر الاتصال بالإنترنت. يرجى التحقق من الشبكة والمحاولة مرة أخرى.',
+      };
+    default:
+      return {
+        message: 'تعذّر إتمام العملية. يرجى التحقق من البيانات والمحاولة مرة أخرى.',
+      };
+  }
+}
+
+export async function signInWithUsernamePassword(
+  username: string,
+  password: string
+): Promise<User> {
+  const authEmail = usernameToAuthEmail(username);
+  const credential = await signInWithEmailAndPassword(auth, authEmail, password);
+  return credential.user;
+}
+
+export async function registerWithUsernamePassword(
+  username: string,
+  password: string
+): Promise<User> {
+  const authEmail = usernameToAuthEmail(username);
+  const credential = await createUserWithEmailAndPassword(auth, authEmail, password);
+  return credential.user;
+}
+
+export async function changeUserPassword(
+  currentPassword: string,
+  newPassword: string
+): Promise<void> {
+  const currentUser = auth.currentUser;
+  if (!currentUser || !currentUser.email) {
+    throw new Error('لم يتم العثور على جلسة مستخدم نشطة.');
+  }
+  const credential = EmailAuthProvider.credential(currentUser.email, currentPassword);
+  await reauthenticateWithCredential(currentUser, credential);
+  await updatePassword(currentUser, newPassword);
+}
+
+export async function signOutUser(): Promise<void> {
+  await signOut(auth);
+}
+
 function clampAmount(val: number): number {
   if (!Number.isFinite(val) || val < FIELD_LIMITS.AMOUNT_MIN) return 0;
   if (val > FIELD_LIMITS.AMOUNT_MAX) return FIELD_LIMITS.AMOUNT_MAX;
@@ -124,36 +249,49 @@ function generateSafeId(prefix: string): string {
 const inFlightEnsureFund = new Map<string, Promise<UserFund>>();
 
 /**
- * Atomically ensures the parent fund document exists in /funds/{fundId}.
- * Deduplicates concurrent calls (e.g., React StrictMode double-mount or multi-device startup).
+ * Atomically ensures the authenticated user's parent fund document exists in /users/{userId}.
+ * Deduplicates concurrent calls (e.g., React StrictMode double-mount).
  */
-export function ensureFund(fundId: string): Promise<UserFund> {
-  const existingPromise = inFlightEnsureFund.get(fundId);
+export function ensureUserFund(userId: string, username: string): Promise<UserFund> {
+  const existingPromise = inFlightEnsureFund.get(userId);
   if (existingPromise) {
     return existingPromise;
   }
 
-  const fundPath = `funds/${fundId}`;
-  const fundRef = doc(db, 'funds', fundId);
+  const fundPath = `users/${userId}`;
+  const fundRef = doc(db, 'users', userId);
+  const cleanUsername = sanitizeText(username, 64) || 'مستخدم';
 
   const task = (async (): Promise<UserFund> => {
     try {
       return await runTransaction(db, async (tx) => {
         const snap = await tx.get(fundRef);
         if (snap.exists()) {
-          const existing = snap.data() as UserFund;
-          if (existing.currency !== FIXED_CURRENCY) {
+          const existing = snap.data() as Partial<UserFund>;
+          const needsUpdate =
+            existing.currency !== FIXED_CURRENCY || !existing.username;
+          const resolvedUsername = existing.username || cleanUsername;
+          if (needsUpdate) {
             tx.update(fundRef, {
+              username: resolvedUsername,
               currency: FIXED_CURRENCY,
               updatedAt: serverTimestamp(),
             });
-            return { ...existing, currency: FIXED_CURRENCY };
           }
-          return existing;
+          return {
+            ownerId: userId,
+            username: resolvedUsername,
+            fundName: existing.fundName || 'صندوق العائلة',
+            currency: FIXED_CURRENCY,
+            reminderTemplate: existing.reminderTemplate || DEFAULT_REMINDER_TEMPLATE,
+            createdAt: existing.createdAt,
+            updatedAt: existing.updatedAt,
+          };
         }
 
         const initialFund = {
-          fundId,
+          ownerId: userId,
+          username: cleanUsername,
           fundName: 'صندوق العائلة',
           currency: FIXED_CURRENCY,
           reminderTemplate: DEFAULT_REMINDER_TEMPLATE,
@@ -162,41 +300,50 @@ export function ensureFund(fundId: string): Promise<UserFund> {
         };
         tx.set(fundRef, initialFund);
         return {
-          fundId,
+          ownerId: userId,
+          username: cleanUsername,
           fundName: initialFund.fundName,
           currency: initialFund.currency,
           reminderTemplate: initialFund.reminderTemplate,
         };
       });
     } catch (error) {
-      // Fallback check in case another device created the fund right before our transaction
       try {
         const verifySnap = await getDoc(fundRef);
         if (verifySnap.exists()) {
-          return verifySnap.data() as UserFund;
+          const data = verifySnap.data() as Partial<UserFund>;
+          return {
+            ownerId: userId,
+            username: data.username || cleanUsername,
+            fundName: data.fundName || 'صندوق العائلة',
+            currency: FIXED_CURRENCY,
+            reminderTemplate: data.reminderTemplate || DEFAULT_REMINDER_TEMPLATE,
+            createdAt: data.createdAt,
+            updatedAt: data.updatedAt,
+          };
         }
       } catch {
-        // Proceed to surface original Firestore error
+        // Surface original error
       }
       handleFirestoreError(error, OperationType.CREATE, fundPath);
     }
   })();
 
-  inFlightEnsureFund.set(fundId, task);
+  inFlightEnsureFund.set(userId, task);
   task.finally(() => {
-    inFlightEnsureFund.delete(fundId);
+    inFlightEnsureFund.delete(userId);
   });
   return task;
 }
 
-export function subscribeFund(
-  fundId: string,
+export function subscribeUserFund(
+  userId: string,
   onData: (fund: UserFund | null) => void,
   onError: (err: Error) => void
 ): Unsubscribe {
-  const path = `funds/${fundId}`;
+  const path = `users/${userId}`;
   return onSnapshot(
-    doc(db, 'funds', fundId),
+    doc(db, 'users', userId),
     (snapshot) => {
       onData(snapshot.exists() ? (snapshot.data() as UserFund) : null);
     },
@@ -211,12 +358,12 @@ export function subscribeFund(
 }
 
 export function subscribeMembers(
-  fundId: string,
+  userId: string,
   onData: (members: FamilyMember[]) => void,
   onError: (err: Error) => void
 ): Unsubscribe {
-  const path = `funds/${fundId}/members`;
-  const q = query(collection(db, 'funds', fundId, 'members'), where('fundId', '==', fundId));
+  const path = `users/${userId}/members`;
+  const q = query(collection(db, 'users', userId, 'members'), where('ownerId', '==', userId));
   return onSnapshot(
     q,
     (snapshot) => {
@@ -238,12 +385,12 @@ export function subscribeMembers(
 }
 
 export function subscribePayments(
-  fundId: string,
+  userId: string,
   onData: (payments: MonthlyPayment[]) => void,
   onError: (err: Error) => void
 ): Unsubscribe {
-  const path = `funds/${fundId}/payments`;
-  const q = query(collection(db, 'funds', fundId, 'payments'), where('fundId', '==', fundId));
+  const path = `users/${userId}/payments`;
+  const q = query(collection(db, 'users', userId, 'payments'), where('ownerId', '==', userId));
   return onSnapshot(
     q,
     (snapshot) => {
@@ -264,17 +411,17 @@ export function subscribePayments(
 }
 
 export async function updateFundSettings(
-  fundId: string,
+  userId: string,
   input: { fundName: string; reminderTemplate: string }
 ): Promise<void> {
-  const path = `funds/${fundId}`;
+  const path = `users/${userId}`;
   const fundName = sanitizeText(input.fundName, FIELD_LIMITS.FUND_NAME_MAX) || 'صندوق العائلة';
   const reminderTemplate =
     sanitizeText(input.reminderTemplate, FIELD_LIMITS.REMINDER_TEMPLATE_MAX) ||
     DEFAULT_REMINDER_TEMPLATE;
 
   try {
-    await updateDoc(doc(db, 'funds', fundId), {
+    await updateDoc(doc(db, 'users', userId), {
       fundName,
       currency: FIXED_CURRENCY,
       reminderTemplate,
@@ -286,7 +433,7 @@ export async function updateFundSettings(
 }
 
 export async function createMember(
-  fundId: string,
+  userId: string,
   input: {
     name: string;
     phone: string;
@@ -297,7 +444,7 @@ export async function createMember(
   }
 ): Promise<string> {
   const memberId = generateSafeId('mem');
-  const path = `funds/${fundId}/members/${memberId}`;
+  const path = `users/${userId}/members/${memberId}`;
   const name = sanitizeText(input.name, FIELD_LIMITS.MEMBER_NAME_MAX);
   if (!name) throw new Error('يرجى إدخال اسم الفرد.');
 
@@ -309,8 +456,8 @@ export async function createMember(
     : getCurrentMonthKey();
 
   try {
-    await setDoc(doc(db, 'funds', fundId, 'members', memberId), {
-      fundId,
+    await setDoc(doc(db, 'users', userId, 'members', memberId), {
+      ownerId: userId,
       name,
       phone,
       relation,
@@ -327,7 +474,7 @@ export async function createMember(
 }
 
 export async function updateMember(
-  fundId: string,
+  userId: string,
   memberId: string,
   input: {
     name: string;
@@ -338,7 +485,7 @@ export async function updateMember(
     isActive: boolean;
   }
 ): Promise<void> {
-  const path = `funds/${fundId}/members/${memberId}`;
+  const path = `users/${userId}/members/${memberId}`;
   const name = sanitizeText(input.name, FIELD_LIMITS.MEMBER_NAME_MAX);
   if (!name) throw new Error('يرجى إدخال اسم الفرد.');
 
@@ -350,7 +497,7 @@ export async function updateMember(
     : getCurrentMonthKey();
 
   try {
-    await updateDoc(doc(db, 'funds', fundId, 'members', memberId), {
+    await updateDoc(doc(db, 'users', userId, 'members', memberId), {
       name,
       phone,
       relation,
@@ -365,21 +512,21 @@ export async function updateMember(
 }
 
 export async function deleteMemberAndPayments(
-  fundId: string,
+  userId: string,
   memberId: string,
   memberPaymentIds: string[]
 ): Promise<void> {
-  const path = `funds/${fundId}/members/${memberId}`;
+  const path = `users/${userId}/members/${memberId}`;
   try {
     if (memberPaymentIds.length === 0) {
-      await deleteDoc(doc(db, 'funds', fundId, 'members', memberId));
+      await deleteDoc(doc(db, 'users', userId, 'members', memberId));
       return;
     }
     const batch = writeBatch(db);
     memberPaymentIds.forEach((paymentId) => {
-      batch.delete(doc(db, 'funds', fundId, 'payments', paymentId));
+      batch.delete(doc(db, 'users', userId, 'payments', paymentId));
     });
-    batch.delete(doc(db, 'funds', fundId, 'members', memberId));
+    batch.delete(doc(db, 'users', userId, 'members', memberId));
     await batch.commit();
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, path);
@@ -387,7 +534,7 @@ export async function deleteMemberAndPayments(
 }
 
 export async function saveMonthlyPayment(
-  fundId: string,
+  userId: string,
   input: {
     memberId: string;
     monthKey: string;
@@ -399,7 +546,7 @@ export async function saveMonthlyPayment(
   }
 ): Promise<void> {
   const paymentId = `${input.memberId}_${input.monthKey}`;
-  const path = `funds/${fundId}/payments/${paymentId}`;
+  const path = `users/${userId}/payments/${paymentId}`;
   const expectedAmount = clampAmount(input.expectedAmount);
   const paidAmount = clampAmount(input.paidAmount);
   const status: PaymentStatus = computePaymentStatus(paidAmount, expectedAmount);
@@ -407,7 +554,7 @@ export async function saveMonthlyPayment(
   const paidDate = FIELD_PATTERNS.DATE_STR.test(rawDate) ? rawDate : '';
   const note = sanitizeText(input.note, FIELD_LIMITS.NOTE_MAX);
 
-  const ref = doc(db, 'funds', fundId, 'payments', paymentId);
+  const ref = doc(db, 'users', userId, 'payments', paymentId);
 
   try {
     await runTransaction(db, async (tx) => {
@@ -423,7 +570,7 @@ export async function saveMonthlyPayment(
         });
       } else {
         tx.set(ref, {
-          fundId,
+          ownerId: userId,
           memberId: input.memberId,
           monthKey: input.monthKey,
           expectedAmount,
@@ -442,14 +589,14 @@ export async function saveMonthlyPayment(
 }
 
 export async function recordReminderSent(
-  fundId: string,
+  userId: string,
   member: FamilyMember,
   monthKey: string,
   _existingPayment?: MonthlyPayment
 ): Promise<void> {
   const paymentId = `${member.id}_${monthKey}`;
-  const path = `funds/${fundId}/payments/${paymentId}`;
-  const ref = doc(db, 'funds', fundId, 'payments', paymentId);
+  const path = `users/${userId}/payments/${paymentId}`;
+  const ref = doc(db, 'users', userId, 'payments', paymentId);
 
   try {
     await runTransaction(db, async (tx) => {
@@ -461,7 +608,7 @@ export async function recordReminderSent(
         });
       } else {
         tx.set(ref, {
-          fundId,
+          ownerId: userId,
           memberId: member.id,
           monthKey,
           expectedAmount: clampAmount(member.monthlyAmount),
@@ -483,7 +630,7 @@ export async function recordReminderSent(
 /**
  * Populates a realistic Bahraini family fund sample dataset across 3 months.
  */
-export async function seedSampleFamilyData(fundId: string): Promise<void> {
+export async function seedSampleFamilyData(userId: string): Promise<void> {
   const currentMonth = getCurrentMonthKey();
   const prevMonth1 = addMonths(currentMonth, -1);
   const prevMonth2 = addMonths(currentMonth, -2);
@@ -501,8 +648,8 @@ export async function seedSampleFamilyData(fundId: string): Promise<void> {
   const batch = writeBatch(db);
 
   sampleMembers.forEach((m) => {
-    batch.set(doc(db, 'funds', fundId, 'members', m.id), {
-      fundId,
+    batch.set(doc(db, 'users', userId, 'members', m.id), {
+      ownerId: userId,
       name: m.name,
       phone: m.phone,
       relation: m.relation,
@@ -515,8 +662,8 @@ export async function seedSampleFamilyData(fundId: string): Promise<void> {
   });
 
   sampleMembers.forEach((m, idx) => {
-    batch.set(doc(db, 'funds', fundId, 'payments', `${m.id}_${prevMonth2}`), {
-      fundId,
+    batch.set(doc(db, 'users', userId, 'payments', `${m.id}_${prevMonth2}`), {
+      ownerId: userId,
       memberId: m.id,
       monthKey: prevMonth2,
       expectedAmount: m.monthlyAmount,
@@ -529,8 +676,8 @@ export async function seedSampleFamilyData(fundId: string): Promise<void> {
     });
 
     const lastPaid = idx === 4 ? Math.round((m.monthlyAmount / 2) * 1000) / 1000 : m.monthlyAmount;
-    batch.set(doc(db, 'funds', fundId, 'payments', `${m.id}_${prevMonth1}`), {
-      fundId,
+    batch.set(doc(db, 'users', userId, 'payments', `${m.id}_${prevMonth1}`), {
+      ownerId: userId,
       memberId: m.id,
       monthKey: prevMonth1,
       expectedAmount: m.monthlyAmount,
@@ -543,8 +690,8 @@ export async function seedSampleFamilyData(fundId: string): Promise<void> {
     });
 
     if (idx < 3) {
-      batch.set(doc(db, 'funds', fundId, 'payments', `${m.id}_${currentMonth}`), {
-        fundId,
+      batch.set(doc(db, 'users', userId, 'payments', `${m.id}_${currentMonth}`), {
+        ownerId: userId,
         memberId: m.id,
         monthKey: currentMonth,
         expectedAmount: m.monthlyAmount,
@@ -557,8 +704,8 @@ export async function seedSampleFamilyData(fundId: string): Promise<void> {
       });
     } else if (idx === 3) {
       const partialAmt = Math.round(m.monthlyAmount * 0.5 * 1000) / 1000;
-      batch.set(doc(db, 'funds', fundId, 'payments', `${m.id}_${currentMonth}`), {
-        fundId,
+      batch.set(doc(db, 'users', userId, 'payments', `${m.id}_${currentMonth}`), {
+        ownerId: userId,
         memberId: m.id,
         monthKey: currentMonth,
         expectedAmount: m.monthlyAmount,
@@ -575,6 +722,6 @@ export async function seedSampleFamilyData(fundId: string): Promise<void> {
   try {
     await batch.commit();
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `funds/${fundId}`);
+    handleFirestoreError(error, OperationType.WRITE, `users/${userId}`);
   }
 }
