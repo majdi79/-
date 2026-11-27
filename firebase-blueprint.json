@@ -1,0 +1,190 @@
+{
+  "entities": {
+    "UserFund": {
+      "title": "UserFund",
+      "description": "Configuration and profile for a family contribution fund owned by a single authenticated treasurer.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the fund owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "fundName": {
+          "type": "string",
+          "description": "Display name of the family fund.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "currency": {
+          "type": "string",
+          "description": "Short currency symbol or code displayed next to monetary amounts.",
+          "minLength": 1,
+          "maxLength": 12
+        },
+        "reminderTemplate": {
+          "type": "string",
+          "description": "Customizable WhatsApp payment reminder message template.",
+          "minLength": 1,
+          "maxLength": 600
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the fund was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the fund settings were last updated."
+        }
+      },
+      "required": ["ownerId", "fundName", "currency", "reminderTemplate", "createdAt", "updatedAt"]
+    },
+    "FamilyMember": {
+      "title": "FamilyMember",
+      "description": "A family member participating in the monthly contribution fund with a pre-allocated monthly amount.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the fund owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Full name of the family member.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "phone": {
+          "type": "string",
+          "description": "WhatsApp phone number with optional country code.",
+          "minLength": 0,
+          "maxLength": 24,
+          "pattern": "^[0-9+\\-\\s()]{0,24}$"
+        },
+        "relation": {
+          "type": "string",
+          "description": "Optional family relation or note.",
+          "minLength": 0,
+          "maxLength": 40
+        },
+        "monthlyAmount": {
+          "type": "number",
+          "description": "Pre-allocated monthly contribution amount (non-negative, up to 1,000,000)."
+        },
+        "startMonth": {
+          "type": "string",
+          "description": "Starting month key in YYYY-MM format.",
+          "minLength": 7,
+          "maxLength": 7,
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])$"
+        },
+        "isActive": {
+          "type": "boolean",
+          "description": "Whether the member is currently active for monthly billing."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the member record was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the member record was last updated."
+        }
+      },
+      "required": ["ownerId", "name", "phone", "relation", "monthlyAmount", "startMonth", "isActive", "createdAt", "updatedAt"]
+    },
+    "MonthlyPayment": {
+      "title": "MonthlyPayment",
+      "description": "A payment record for a specific family member in a specific calendar month (document ID: memberId_YYYY-MM).",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the fund owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "memberId": {
+          "type": "string",
+          "description": "Document ID of the associated FamilyMember.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "monthKey": {
+          "type": "string",
+          "description": "Calendar month key in YYYY-MM format.",
+          "minLength": 7,
+          "maxLength": 7,
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])$"
+        },
+        "expectedAmount": {
+          "type": "number",
+          "description": "Expected monthly contribution snapshot for this month."
+        },
+        "paidAmount": {
+          "type": "number",
+          "description": "Amount actually paid for this month."
+        },
+        "status": {
+          "type": "string",
+          "description": "Payment state for this month.",
+          "enum": ["paid", "partial", "unpaid"]
+        },
+        "paidDate": {
+          "type": "string",
+          "description": "ISO date (YYYY-MM-DD) when payment was recorded, or empty string if unpaid.",
+          "minLength": 0,
+          "maxLength": 10,
+          "pattern": "^(|[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01]))$"
+        },
+        "note": {
+          "type": "string",
+          "description": "Optional payment method or short remark.",
+          "minLength": 0,
+          "maxLength": 160
+        },
+        "lastRemindedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Optional server timestamp of last WhatsApp reminder sent."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the payment record was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the payment record was last updated."
+        }
+      },
+      "required": ["ownerId", "memberId", "monthKey", "expectedAmount", "paidAmount", "status", "paidDate", "note", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserFund" },
+      "description": "Private family fund configuration document owned strictly by the authenticated user."
+    },
+    "/users/{userId}/members/{memberId}": {
+      "schema": { "$ref": "#/entities/FamilyMember" },
+      "description": "Family members belonging to the user's fund, containing PII (name, phone) restricted to the fund owner."
+    },
+    "/users/{userId}/payments/{paymentId}": {
+      "schema": { "$ref": "#/entities/MonthlyPayment" },
+      "description": "Monthly payment ledger records linked to members in the user's fund."
+    }
+  }
+}
